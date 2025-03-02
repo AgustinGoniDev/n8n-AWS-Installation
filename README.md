@@ -1,73 +1,125 @@
-# Configuración de AWS para Docker y Nginx & Certificado con Certbot con n8n.
+### Guía de Configuración AWS con Docker, Nginx y SSL para n8n
 
-### Requisitos previos:
-- Cuenta de AWS
-- Creación de instancia EC2 (Si recién te registras podes tenerla por 1 año gratis)
-- Creación de archivo .pem para claves SSH (En caso de no tenerlo)
-- Tener un dominio (Aca te dejo como tener uno gratis, https://www.noip.com/es-MX)
 
-### Paso 1: Conectarse a la instancia de AWS EC2 vía SSH
+### Paso 1: Crear la instancia EC2 en AWS
+
+- Ingresar a AWS
+
+- Buscá "EC2" en el buscador y entrá al servicio.
+
+- Lanzar una nueva instancia
+
+# Crear una nueva instancia en AWS
+
+- Hacé clic en "Launch instance" (Iniciar instancia).
+
+- Nombre: Poné algo como n8n-server.
+
+- Imagen de Amazon Machine (AMI): Elegí Ubuntu 22.04 LTS (versión recomendada por estabilidad y soporte).
+
+- Tipo de instancia: Si es para pruebas, podés elegir t2.micro (gratis con Free Tier).
+
+- Par de claves (Key Pair): Creá una nueva o usá una existente (vas a necesitarla para conectarte por SSH).
+
+# Grupo de seguridad:
+
+- Permití conexiones SSH (22) desde tu IP (o un rango seguro).
+
+- Permití tráfico en los puertos 80 (HTTP) y 443 (HTTPS) desde cualquier origen (0.0.0.0/0).
+
+- Permití el puerto 5678 (n8n) si lo vas a acceder directamente.
+
+- Revisá la configuración y dale a Launch Instance.
+
+- Esperá a que la instancia inicie y copiá su IP pública.
+  
+
+### Paso 2: Conectarse a la instancia de AWS EC2 vía SSH
+
 ```bash
 ssh -i yourkey.pem ec2-user@publicip
 ```
 
-### Paso 2: Actualizar la instancia e instalar Docker
+### Paso 3: Instalar Docker y Docker Compose
+# 1- Actualizar paquetes
 ```bash
-sudo apt update -y
-sudo apt install -y docker
+sudo apt update && sudo apt upgrade -y
 ```
-
-### Paso 3: Iniciar y habilitar el servicio Docker
+# 2- Instalar dependencias
 ```bash
-sudo systemctl start docker
-sudo systemctl enable docker
+sudo apt install -y ca-certificates curl gnupg
 ```
-
-### Paso 4: Agregar el usuario al grupo Docker para acceso sin root
+# 3- Agregar repositorio de Docker
 ```bash
-sudo usermod -aG docker ec2-user
+sudo install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo tee /etc/apt/keyrings/docker.asc > /dev/null
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+sudo apt update
 ```
-
-### Paso 5: Salir y volver a ingresar para aplicar los cambios
+# 4- Instalar Docker y Docker Compose
+```bash
+sudo apt install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+```
+# 5- Agregar tu usuario a Docker para no necesitar "sudo"
+```bash
+sudo usermod -aG docker $USER
+```
+# 6- Reiniciar para aplicar los cambios
 ```bash
 exit
 ```
+# 7- Volver a conectarte por SSH
 
-### Paso 6: Conectarse a la instancia de AWS EC2 vía SSH
+
+### Paso 4: Configurar n8n con Docker
+# 1- Crear una carpeta para n8n
 ```bash
-ssh -i yourkey.pem ec2-user@publicip
+mkdir -p ~/n8n && cd ~/n8n
+```
+# 2- Crear un archivo docker-compose.yml
+```bash
+nano docker-compose.yml
+```
+Pegá esto dentro:
+```yaml
+
+services:
+  n8n:
+    image: n8nio/n8n
+    restart: always
+    ports:
+      - "5678:5678"
+    environment:
+        - N8N_HOST=n8n.tudominio.com
+        - N8N_PROTOCOL=https
+        - WEBHOOK_URL=https://n8n.tudominio.com/
+    volumes:
+      - ~/.n8n:/home/node/.n8n
+```
+Guarda con: 
+```bash
+Ctrl + X, Y. Enter
+```
+# 3- Levantar n8n 
+```bash
+docker compose up -d
 ```
 
-### Paso 7: Instalar Docker Compose
+### Paso 5: Configurar Nginx como Proxy Reverso con SSL
+Se utiliza Nginx y Let's Encrypt para que tu entorno de n8n sea accesibl con dominio y HTTPS
+# 1- Instalar Nginx y Certbot
 ```bash
-sudo curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
-sudo chmod +x /usr/local/bin/docker-compose
-```
-
-### Paso 8: Ejecutar el contenedor Docker de N8N
-```bash
-sudo docker run -d --restart unless-stopped -it \
---name n8n \
--p 5678:5678 \
--e N8N_HOST="your-domain-name" \
--e WEBHOOK_TUNNEL_URL="https://your-domain-name/" \
--e WEBHOOK_URL="https://your-domain-name/" \
--v ~/.n8n:/root/.n8n \
-n8nio/n8n
-```
-
-### Paso 9: Instalar y configurar Nginx
-```bash
-sudo dnf install -y nginx
+sudo apt install -y nginx
 sudo systemctl start nginx
 sudo systemctl enable nginx
 ```
 
-### Paso 10: Configurar Nginx como Proxy Inverso para N8N
+# 2- Crear un archivo de configuración para n8n
 ```bash
-sudo nano /etc/nginx/conf.d/n8n.conf
+sudo nano /etc/nginx/sites-available/n8n
 ```
-Agregar el siguiente contenido en `n8n.conf`:
+
+Pegá esto (reemplazá n8n.tudominio.com por tu dominio real):
 ```nginx
 server {
     listen 80;
@@ -80,9 +132,11 @@ server {
         proxy_buffering off;
         proxy_cache off;
 
+        # Headers for WebSocket support
         proxy_set_header Connection 'Upgrade';
         proxy_set_header Upgrade $http_upgrade;
 
+        # Additional headers for forwarding client info
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
@@ -90,19 +144,29 @@ server {
     }
 }
 ```
-Guardar y salir usando:
+Guarda con: 
 ```bash
 CTRL+O, ENTER, CTRL+X
 ```
 
-### Paso 11: Probar la configuración de Nginx y reiniciar el servicio
+# 3- Habilitar la configuración y reiniciar Nginx
 ```bash
+sudo ln -s /etc/nginx/sites-available/n8n /etc/nginx/sites-enabled/
 sudo nginx -t
 sudo systemctl restart nginx
 ```
 
-### Paso 12: Configurar el certificado SSL con Certbot
+# 4- Generar el certificado SSL con Let's Encrypt
 ```bash
-sudo dnf install -y certbot python3-certbot-nginx
+sudo apt install -y certbot python3-certbot-nginx
 sudo certbot --nginx -d your-domain-name
 sudo systemctl restart nginx
+```
+
+### Paso 6: Configurar Renovación Automática de SSL
+
+Certbot renueva los certificados automáticamente, pero podés verificar con:
+```bash
+sudo certbot renew --dry-run
+```
+
